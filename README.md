@@ -143,3 +143,11 @@ make down
 ## License
 
 The project is licensed under the [Apache 2.0 License](LICENSE).
+
+### Experimental namespace opt-in operator
+
+The default controller remains `legacy`. An experimental `namespaced` mode discovers
+`VaultReloader/default` resources and watches workloads only in namespaces whose teams
+have granted a local RoleBinding. It polls Vault KV v2 metadata without reading values.
+See [the design, installation model, authentication and validation limits](docs/namespaced-operator.md)
+and [the team opt-in example](examples/namespaced/team.yaml).

@@ -139,3 +139,35 @@ tolerations: []
 # -- Node affinity settings for the pods.
 # Check: <https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/>
 affinity: {}
+
+# -- legacy preserves the original controller and RBAC; namespaced enables the experimental operator.
+mode: legacy
+namespaced:
+  # -- Manage the experimental CRD as a Helm template (kept on uninstall). Alternatively install config/crd/bases separately.
+  installCRD: false
+  # -- Required exact Vault origins. Never derived from workload annotations.
+  vaultAddressAllowlist: []
+  allowHTTPVault: false
+  vaultAuthSource: controller
+  vaultAudience: vault
+  vaultJWTFile: /var/run/secrets/vault/token
+  vaultCAFile: ""
+  allowTokenRequest: false
+  serviceAccountAllowlist: []
+  allowCASecretReads: false
+  caSecretAllowlist: []
+  leaderElection: true
+  pollInterval: 1m
+  accessCheckInterval: 1m
+  cacheSyncTimeout: 30s
+  requestTimeout: 10s
+  rolloutTimeout: 10m
+  maxNamespaces: 128
+  maxTargets: 200
+  maxPaths: 100
+  maxCacheEntries: 10000
+  maxStateBytes: 524288
+  pollWorkers: 8
+  pollWorkersPerVault: 4
+  pollWorkersPerNamespace: 2
+  vaultQPS: 10
