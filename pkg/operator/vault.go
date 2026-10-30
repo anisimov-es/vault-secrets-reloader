@@ -192,13 +192,13 @@ func (v *VaultReader) prepare(ctx context.Context, s Source, item *vaultSession)
 	// CA bytes are public trust material; Secret access still requires explicit opt-in and a local grant.
 	var ca []byte
 	var err error
-	if s.CAFile != "" {
+	if !s.SkipTLSVerify && s.CAFile != "" {
 		ca, err = os.ReadFile(s.CAFile)
 		if err != nil {
 			return nil, "", &PollError{Code: "CAFileUnavailable"}
 		}
 	}
-	if s.CASecret != "" {
+	if !s.SkipTLSVerify && s.CASecret != "" {
 		if !v.options.AllowCASecrets || !contains(v.options.AllowedCASecrets, s.Tenant+"/"+s.CASecret) {
 			return nil, "", &PollError{Code: "CASecretNotApproved"}
 		}
@@ -224,7 +224,8 @@ func (v *VaultReader) prepare(ctx context.Context, s Source, item *vaultSession)
 			return nil, "", &PollError{Code: "InvalidCA"}
 		}
 		transport := http.DefaultTransport.(*http.Transport).Clone()
-		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
+		// Explicit per-workload opt-in; the origin allowlist still applies.
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, InsecureSkipVerify: s.SkipTLSVerify} //nolint:gosec // Requested per-workload TLS verification bypass.
 		transport.MaxConnsPerHost = v.options.PerVaultWorkers
 		transport.MaxIdleConnsPerHost = v.options.PerVaultWorkers
 		item.client = &http.Client{Transport: transport, Timeout: v.options.RequestTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirects are disabled") }}

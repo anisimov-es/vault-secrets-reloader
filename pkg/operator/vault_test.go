@@ -355,3 +355,98 @@ func TestReferenceCompatibilityWithoutReadingValues(t *testing.T) {
 		t.Fatal("dynamic path accepted")
 	}
 }
+
+func TestWorkloadLabelOptIn(t *testing.T) {
+	cases := []struct {
+		name, annotation, resourceLabel, templateLabel string
+		want                                           bool
+	}{
+		{"annotation", "true", "", "", true},
+		{"resource label", "", "true", "", true},
+		{"pod template label", "", "", "true", true},
+		{"disabled", "false", "false", "false", false},
+		{"either opt in enables", "false", "true", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dep := testDeployment("team-a", "app")
+			dep.Spec.Template.Annotations[OptIn] = tc.annotation
+			dep.Labels = map[string]string{OptIn: tc.resourceLabel}
+			dep.Spec.Template.Labels = map[string]string{OptIn: tc.templateLabel}
+			w, err := workloadOf(dep)
+			if err != nil || w.Enabled() != tc.want {
+				t.Fatalf("enabled=%v want=%v err=%v", w.Enabled(), tc.want, err)
+			}
+		})
+	}
+}
+
+func TestSkipTLSVerificationIsExplicitAndIsolated(t *testing.T) {
+	var logins atomic.Int64
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/login") {
+			logins.Add(1)
+			_, _ = fmt.Fprint(w, `{"auth":{"client_token":"test","lease_duration":600}}`)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"data":{"current_version":1,"created_time":"k","versions":{"1":{"created_time":"v"}}}}`)
+	}))
+	defer srv.Close()
+	o := testOptions()
+	o.AllowedAddresses = []string{srv.URL}
+	o.JWTFile = filepath.Join(t.TempDir(), "jwt")
+	if err := os.WriteFile(o.JWTFile, []byte("test-jwt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dep := testDeployment("team-a", "app")
+	dep.Spec.Template.Annotations[prefix+"vault-addr"] = srv.URL
+	w, _ := workloadOf(dep)
+	verified, err := parseSource(w, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := NewVaultReader(o, fake.NewClientset())
+	defer reader.Close()
+	if _, err = reader.Read(context.Background(), verified, "kv/data/demo"); err == nil || logins.Load() != 0 {
+		t.Fatalf("untrusted server accepted or received JWT: %v", err)
+	}
+	dep.Labels = map[string]string{SkipTLSVerify: "true"}
+	w, _ = workloadOf(dep)
+	insecure, err := parseSource(w, o)
+	if err != nil || !insecure.SkipTLSVerify {
+		t.Fatalf("label not recognized: %+v %v", insecure, err)
+	}
+	if verified.ContextKey() == insecure.ContextKey() {
+		t.Fatal("verified and unverified TLS contexts must not share a client")
+	}
+	// Bypass does not require a configured CA file to exist.
+	insecure.CAFile = filepath.Join(t.TempDir(), "missing-ca")
+	if version, err := reader.Read(context.Background(), insecure, "kv/data/demo"); err != nil || version.Version != 1 {
+		t.Fatalf("explicit bypass failed: %+v %v", version, err)
+	}
+	if _, err = reader.Read(context.Background(), verified, "kv/data/demo"); err == nil || logins.Load() != 1 {
+		t.Fatalf("secure client reused insecure connection: %v", err)
+	}
+	dep.Labels[SkipTLSVerify] = "false"
+	dep.Spec.Template.Labels = map[string]string{SkipTLSVerify: "true"}
+	dep.Spec.Template.Annotations[prefix+"vault-skip-verify"] = "true"
+	w, _ = workloadOf(dep)
+	if source, err := parseSource(w, o); err != nil || !source.SkipTLSVerify {
+		t.Fatalf("pod-template TLS label not recognized: %+v %v", source, err)
+	}
+	dep.Spec.Template.Labels[SkipTLSVerify] = "false"
+	w, _ = workloadOf(dep)
+	if _, err := parseSource(w, o); err == nil {
+		t.Fatal("webhook annotation must not silently disable operator TLS verification")
+	}
+	dep.Spec.Template.Labels[SkipTLSVerify] = "true"
+	dep.Spec.Template.Annotations[prefix+"vault-addr"] = "https://unapproved.example"
+	w, _ = workloadOf(dep)
+	if _, err := parseSource(w, o); err == nil {
+		t.Fatal("TLS bypass must not bypass the Vault origin allowlist")
+	}
+	b, _ := json.Marshal(verified)
+	if strings.Contains(string(b), "SkipTLSVerify") {
+		t.Fatal("default source serialization must remain compatible with existing status hashes")
+	}
+}

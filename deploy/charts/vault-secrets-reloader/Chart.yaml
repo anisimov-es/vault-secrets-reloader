@@ -1,8 +1,8 @@
 apiVersion: v2
 type: application
 name: vault-secrets-reloader
-version: 0.0.0
-appVersion: latest
+version: 0.5.0-operator-test.1
+appVersion: preview-tls-labels-1
 description: A Kubernetes Controller that reloads workloads on a referenced secret change in HashiCorp Vault.
 keywords:
   - vault
@@ -10,10 +10,9 @@ keywords:
   - secret
   - webhook
   - reloader
-home: https://bank-vaults.dev
+home: https://github.com/anisimov-es/vault-secrets-reloader
 sources:
   - https://github.com/hashicorp/vault
-  - https://github.com/bank-vaults/vault-secrets-reloader
+  - https://github.com/anisimov-es/vault-secrets-reloader
 maintainers:
-  - name: Bank Vaults Maintainers
-    email: team@bank-vaults.dev
+  - name: Anisimov Evgeniy
