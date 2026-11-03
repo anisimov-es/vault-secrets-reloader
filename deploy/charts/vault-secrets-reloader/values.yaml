@@ -158,6 +158,8 @@ namespaced:
   caSecretAllowlist: []
   leaderElection: true
   pollInterval: 1m
+  # -- Periodic namespace reconciliation; workload events are processed independently.
+  reconcileInterval: 1m
   accessCheckInterval: 1m
   cacheSyncTimeout: 30s
   requestTimeout: 10s

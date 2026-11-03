@@ -16,6 +16,7 @@ import (
 
 type Options struct {
 	PollInterval           time.Duration
+	ReconcileInterval      time.Duration
 	AccessInterval         time.Duration
 	SyncTimeout            time.Duration
 	RequestTimeout         time.Duration
@@ -55,7 +56,7 @@ type Options struct {
 
 func DefaultOptions() Options {
 	return Options{
-		PollInterval: time.Minute, AccessInterval: time.Minute, SyncTimeout: 30 * time.Second,
+		PollInterval: time.Minute, ReconcileInterval: time.Minute, AccessInterval: time.Minute, SyncTimeout: 30 * time.Second,
 		RequestTimeout: 10 * time.Second, RetryMin: time.Second, RetryMax: time.Minute,
 		RolloutTimeout: 10 * time.Minute, MaxNamespaces: 128, MaxTargets: 200, MaxPaths: 100,
 		MaxStateBytes: 512 * 1024, MaxEntries: 10000, Workers: 8, PerVaultWorkers: 4,
@@ -72,7 +73,7 @@ func ValidateMode(mode string) error {
 	return nil
 }
 func (o Options) Validate() error {
-	if o.PollInterval <= 0 || o.AccessInterval <= 0 || o.SyncTimeout <= 0 || o.RequestTimeout <= 0 || o.RetryMin <= 0 || o.RetryMax < o.RetryMin || o.RolloutTimeout <= 0 {
+	if o.PollInterval <= 0 || o.ReconcileInterval <= 0 || o.AccessInterval <= 0 || o.SyncTimeout <= 0 || o.RequestTimeout <= 0 || o.RetryMin <= 0 || o.RetryMax < o.RetryMin || o.RolloutTimeout <= 0 {
 		return errors.New("intervals/timeouts must be positive and retryMax >= retryMin")
 	}
 	if o.MaxNamespaces < 1 || o.MaxTargets < 1 || o.MaxPaths < 1 || o.MaxEntries < 1 || o.MaxStateBytes < 1024 || o.Workers < 1 || o.PerVaultWorkers < 1 || o.PerTenantWorkers < 1 || o.VaultQPS <= 0 {

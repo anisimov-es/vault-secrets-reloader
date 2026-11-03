@@ -161,6 +161,34 @@ func TestChartRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 
+func TestNamespaceReconcileIntervalChartValue(t *testing.T) {
+	for _, tc := range []struct{ name, value, expected string }{
+		{name: "default", expected: "--namespace-reconcile-interval=1m"},
+		{name: "override", value: "30s", expected: "--namespace-reconcile-interval=30s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"--set", "mode=namespaced", "--set", "namespaced.vaultAddressAllowlist[0]=https://vault.test"}
+			if tc.value != "" {
+				args = append(args, "--set", "namespaced.reconcileInterval="+tc.value)
+			}
+			for _, obj := range render(t, args...) {
+				if obj["kind"] != "Deployment" {
+					continue
+				}
+				pod := obj["spec"].(map[string]interface{})["template"].(map[string]interface{})["spec"].(map[string]interface{})
+				command := pod["containers"].([]interface{})[0].(map[string]interface{})["command"].([]interface{})
+				for _, arg := range command {
+					if arg == tc.expected {
+						return
+					}
+				}
+				t.Fatalf("missing %s: %v", tc.expected, command)
+			}
+			t.Fatal("Deployment not found")
+		})
+	}
+}
+
 func TestProjectedJWTAndCustomCAVolumesRender(t *testing.T) {
 	objects := render(t, "--set", "mode=namespaced", "--set", "namespaced.vaultAddressAllowlist[0]=https://vault.test", "--set", "volumes[0].name=ca", "--set", "volumes[0].configMap.name=vault-public-ca", "--set", "volumeMounts[0].name=ca", "--set", "volumeMounts[0].mountPath=/etc/vault-ca")
 	for _, obj := range objects {

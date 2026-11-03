@@ -12,6 +12,10 @@
     "namespaced": {
       "type": "object",
       "properties": {
+        "reconcileInterval": {
+          "type": "string",
+          "minLength": 1
+        },
         "vaultAuthSource": {
           "type": "string",
           "enum": [

@@ -175,7 +175,7 @@ func (r *namespaceRuntime) watch(parent context.Context) error {
 	}
 	r.controller.options.Logger.Debug("workload informer caches synchronized", "namespace", r.namespace)
 	r.reportAccess(ctx, true)
-	tick := time.NewTicker(time.Second)
+	tick := time.NewTicker(r.controller.options.ReconcileInterval)
 	defer tick.Stop()
 	access := time.NewTicker(r.controller.options.AccessInterval)
 	defer access.Stop()

@@ -50,6 +50,7 @@ func main() {
 	allowedSAs := flag.String("vault-serviceaccount-allowlist", "", "Approved namespace/name pairs for TokenRequest")
 	allowedCAs := flag.String("vault-ca-secret-allowlist", "", "Approved namespace/name pairs for CA Secret reads")
 	flag.DurationVar(&options.PollInterval, "vault-poll-interval", options.PollInterval, "Metadata polling interval")
+	flag.DurationVar(&options.ReconcileInterval, "namespace-reconcile-interval", options.ReconcileInterval, "Periodic namespace reconciliation interval")
 	flag.DurationVar(&options.AccessInterval, "access-check-interval", options.AccessInterval, "Namespace access check interval")
 	flag.DurationVar(&options.RequestTimeout, "request-timeout", options.RequestTimeout, "API/Vault request timeout")
 	flag.DurationVar(&options.SyncTimeout, "cache-sync-timeout", options.SyncTimeout, "Namespace cache synchronization timeout")

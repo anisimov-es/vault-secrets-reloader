@@ -84,6 +84,7 @@ spec:
             - {{ printf "--leader-elect=%v" .Values.namespaced.leaderElection | quote }}
             - {{ printf "--leader-election-name=%s" (include "vault-secrets-reloader.fullname" .) | quote }}
             - {{ printf "--vault-poll-interval=%s" .Values.namespaced.pollInterval | quote }}
+            - {{ printf "--namespace-reconcile-interval=%s" .Values.namespaced.reconcileInterval | quote }}
             - {{ printf "--access-check-interval=%s" .Values.namespaced.accessCheckInterval | quote }}
             - {{ printf "--cache-sync-timeout=%s" .Values.namespaced.cacheSyncTimeout | quote }}
             - {{ printf "--request-timeout=%s" .Values.namespaced.requestTimeout | quote }}

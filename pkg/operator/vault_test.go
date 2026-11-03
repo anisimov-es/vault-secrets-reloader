@@ -34,6 +34,7 @@ func testOptions() Options {
 	o.AllowHTTP = true
 	o.AllowedAddresses = []string{"http://vault.test"}
 	o.PollInterval = 100 * time.Millisecond
+	o.ReconcileInterval = 100 * time.Millisecond
 	o.RetryMin = 20 * time.Millisecond
 	o.RetryMax = 100 * time.Millisecond
 	o.RequestTimeout = 200 * time.Millisecond

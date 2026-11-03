@@ -80,7 +80,7 @@ A process-wide cache and scheduler deduplicate by tenant, Vault origin/namespace
 
 Fair scheduling rotates between tenants, with global, per-origin and per-tenant concurrency limits, per-origin request-start rate limits, request deadlines, retry backoff and jitter. A `403` for team A does not block B–J at the same Vault. A shared Vault outage or a saturated global limit can affect all users of that service. Vault login sessions are independently locked by context, so a slow login for A does not hold a global authentication lock. Login tokens are renewed by reauthentication before expiry; an observed auth error invalidates the token. Vault policy revocation is observed on subsequent requests, not guaranteed instantaneously.
 
-The default poll interval is one minute. Queueing, limits and backoff can increase detection time; the interval is not an SLA. Requests to the metadata API, login and optional Kubernetes credential reads have deadlines. Aggregate metrics are available at `/metrics`; labels do not contain paths, identities or workload names.
+The default poll interval is one minute. Namespace reconciliation runs periodically at `namespaced.reconcileInterval` (default `1m`, for example `30s`) and on workload events. Vault polling is independent; its results are processed on the next namespace reconciliation, so detection and retries may be delayed by up to the reconcile interval, plus queueing and backoff. The interval must be a positive Go duration. Requests to the metadata API, login and optional Kubernetes credential reads have deadlines. Aggregate metrics are available at `/metrics`; labels do not contain paths, identities or workload names.
 
 ## Persistence and rollout
 

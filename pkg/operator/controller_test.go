@@ -36,6 +36,73 @@ func testDeployment(ns, name string) *apps.Deployment {
 		Spec:       apps.DeploymentSpec{Selector: &meta.LabelSelector{MatchLabels: map[string]string{"app": name}}, Template: core.PodTemplateSpec{ObjectMeta: meta.ObjectMeta{Annotations: map[string]string{OptIn: "true", prefix + "vault-addr": "http://vault.test"}}, Spec: core.PodSpec{Containers: []core.Container{{Name: "app", Image: "test", Env: []core.EnvVar{{Name: "PASSWORD", Value: "vault:kv/data/demo#password"}}}}}}},
 	}
 }
+
+func TestReconcileIntervalValidation(t *testing.T) {
+	if DefaultOptions().ReconcileInterval != time.Minute {
+		t.Fatal("default reconciliation interval must be one minute")
+	}
+	for _, value := range []time.Duration{0, -time.Second} {
+		o := testOptions()
+		o.ReconcileInterval = value
+		if err := o.Validate(); err == nil {
+			t.Fatalf("accepted reconciliation interval %v", value)
+		}
+	}
+	o := testOptions()
+	o.ReconcileInterval = 30 * time.Second
+	if err := o.Validate(); err != nil {
+		t.Fatalf("valid reconciliation interval rejected: %v", err)
+	}
+}
+
+func TestNamespaceReconcileIntervalAndWorkloadEvents(t *testing.T) {
+	c, k, d, _, _ := testController(t, "team-a")
+	c.options.ReconcileInterval = 3 * time.Second
+	c.options.AccessInterval = time.Minute
+	k.PrependReactor("create", "selfsubjectaccessreviews", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, &authz.SelfSubjectAccessReview{Status: authz.SubjectAccessReviewStatus{Allowed: true}}, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	getCount := func() int {
+		n := 0
+		for _, action := range d.Actions() {
+			if action.GetVerb() == "get" && action.GetResource() == api.Resource && action.GetNamespace() == "team-a" {
+				n++
+			}
+		}
+		return n
+	}
+	eventually(t, func() bool { return getCount() >= 2 })
+	time.Sleep(200 * time.Millisecond)
+	before := getCount()
+	time.Sleep(1200 * time.Millisecond)
+	if got := getCount(); got != before {
+		t.Fatalf("unexpected periodic CR GET before configured interval: before=%d after=%d", before, got)
+	}
+	dep, err := k.AppsV1().Deployments("team-a").Get(ctx, "app", meta.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dep.Labels = map[string]string{"example": "changed"}
+	if _, err = k.AppsV1().Deployments("team-a").Update(ctx, dep, meta.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && getCount() == before {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if getCount() == before {
+		t.Fatal("workload event did not trigger reconciliation immediately")
+	}
+}
 func testCR(ns string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": api.GroupVersion.String(), "kind": "VaultReloader", "metadata": map[string]interface{}{"namespace": ns, "name": "default", "uid": ns + "-cr", "resourceVersion": "1", "generation": int64(1)}, "spec": map[string]interface{}{"suspend": false},
