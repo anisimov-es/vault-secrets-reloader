@@ -13,6 +13,7 @@ import (
 
 	api "github.com/bank-vaults/vault-secrets-reloader/api/v1alpha1"
 	authz "k8s.io/api/authorization/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -40,6 +41,8 @@ type retryState struct {
 
 func (r *namespaceRuntime) run(ctx context.Context) {
 	c := r.controller
+	c.options.Logger.Info("namespace monitoring started", "namespace", r.namespace)
+	defer c.options.Logger.Info("namespace monitoring stopped", "namespace", r.namespace)
 	c.metrics.Namespaces.Add(1)
 	defer c.metrics.Namespaces.Add(-1)
 	defer func() { c.metrics.Pending.Add(-r.pendingCount); c.metrics.Stalled.Add(-r.stalledCount) }()
@@ -49,7 +52,7 @@ func (r *namespaceRuntime) run(ctx context.Context) {
 		if err := r.checkAccess(ctx); err != nil {
 			c.metrics.AccessDenied.Add(1)
 			r.reportAccess(ctx, false)
-			c.options.Logger.Warn("namespace access unavailable", "namespace", r.namespace)
+			c.options.Logger.Warn("namespace access unavailable", "namespace", r.namespace, "reason", err.Error())
 			if !waitContext(ctx, delay+time.Duration(rand.Float64()*float64(delay)/5)) {
 				return
 			}
@@ -89,12 +92,13 @@ func (r *namespaceRuntime) checkAccess(parent context.Context) error {
 	defer cancel()
 	for _, resource := range []string{"deployments", "statefulsets", "daemonsets"} {
 		for _, verb := range []string{"get", "list", "watch", "patch"} {
+			r.controller.options.Logger.Debug("checking namespace access", "namespace", r.namespace, "resource", resource, "verb", verb)
 			review, err := r.controller.kube.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, &authz.SelfSubjectAccessReview{Spec: authz.SelfSubjectAccessReviewSpec{ResourceAttributes: &authz.ResourceAttributes{Namespace: r.namespace, Group: "apps", Resource: resource, Verb: verb}}}, meta.CreateOptions{})
 			if err != nil {
-				return err
+				return fmt.Errorf("access review failed for %s %s: %s", verb, resource, apierrors.ReasonForError(err))
 			}
 			if !review.Status.Allowed {
-				return errors.New("namespace access denied")
+				return fmt.Errorf("access denied for %s %s", verb, resource)
 			}
 		}
 	}
@@ -126,9 +130,16 @@ func (r *namespaceRuntime) watch(parent context.Context) error {
 	factory := informers.NewSharedInformerFactoryWithOptions(r.controller.kube, 0, informers.WithNamespace(r.namespace))
 	defer func() { cancel(); factory.Shutdown() }()
 	list := []cache.SharedIndexInformer{factory.Apps().V1().Deployments().Informer(), factory.Apps().V1().StatefulSets().Informer(), factory.Apps().V1().DaemonSets().Informer()}
+	r.controller.options.Logger.Debug("starting workload informers", "namespace", r.namespace)
 	changed := make(chan struct{}, 1)
 	watchErrors := make(chan error, 1)
-	signal := func(interface{}) {
+	signal := func(event string, obj interface{}) {
+		if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+			obj = tombstone.Obj
+		}
+		if w, err := workloadOf(obj); err == nil {
+			r.controller.options.Logger.Debug("workload informer event", "namespace", r.namespace, "event", event, "kind", w.Kind, "name", w.Name)
+		}
 		select {
 		case changed <- struct{}{}:
 		default:
@@ -136,7 +147,7 @@ func (r *namespaceRuntime) watch(parent context.Context) error {
 	}
 	registrations := make([]cache.ResourceEventHandlerRegistration, 0, len(list))
 	for _, informer := range list {
-		reg, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: signal, UpdateFunc: func(_, obj interface{}) { signal(obj) }, DeleteFunc: signal})
+		reg, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: func(obj interface{}) { signal("add", obj) }, UpdateFunc: func(_, obj interface{}) { signal("update", obj) }, DeleteFunc: func(obj interface{}) { signal("delete", obj) }})
 		if err != nil {
 			return err
 		}
@@ -162,6 +173,7 @@ func (r *namespaceRuntime) watch(parent context.Context) error {
 		r.reportAccess(ctx, false)
 		return errors.New("namespace caches did not synchronize")
 	}
+	r.controller.options.Logger.Debug("workload informer caches synchronized", "namespace", r.namespace)
 	r.reportAccess(ctx, true)
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
@@ -215,6 +227,7 @@ func (r *namespaceRuntime) reconcile(parent context.Context, list []cache.Shared
 		}
 	}
 	sort.Slice(workloads, func(i, j int) bool { return workloads[i].Key() < workloads[j].Key() })
+	c.options.Logger.Debug("reconciling namespace", "namespace", r.namespace, "enabled_workloads", len(workloads))
 	if len(workloads) > c.options.MaxTargets {
 		return r.problem(ctx, cr, "TargetLimitExceeded")
 	}
@@ -243,6 +256,7 @@ func (r *namespaceRuntime) reconcile(parent context.Context, list []cache.Shared
 			continue
 		}
 		if len(source.Paths) == 0 {
+			c.options.Logger.Debug("workload has no supported unversioned Vault references", "namespace", r.namespace, "kind", w.Kind, "name", w.Name)
 			ignored[w.Key()] = true
 			continue
 		}
@@ -276,14 +290,20 @@ func (r *namespaceRuntime) reconcile(parent context.Context, list []cache.Shared
 		observations := c.poller.Snapshot(source)
 		versions := map[string]api.Version{}
 		ready := true
+		pollErrorSeen := false
 		last := time.Time{}
 		for _, path := range source.Paths {
 			o := observations[path]
 			if o.Pending || o.Err != "" {
 				ready = false
-				previous.Phase = "WaitingForMetadata"
-				if o.Err != "" {
+				if o.Err != "" && !pollErrorSeen {
+					pollErrorSeen = true
 					previous.Phase = o.Err
+					if o.Stage != "" || o.HTTPStatus != 0 {
+						previous.Message = fmt.Sprintf("stage=%s http_status=%d", o.Stage, o.HTTPStatus)
+					}
+				} else if !pollErrorSeen {
+					previous.Phase = "WaitingForMetadata"
 				}
 			}
 			versions[digest(path)] = o.Version
@@ -350,6 +370,26 @@ func (r *namespaceRuntime) reconcile(parent context.Context, list []cache.Shared
 		return err
 	}
 	for _, state := range status.Targets {
+		prior, existed := old[state.Kind+"/"+state.Name+"/"+state.UID]
+		attrs := []any{"namespace", r.namespace, "kind", state.Kind, "name", state.Name}
+		if state.Phase != prior.Phase || state.Message != prior.Message {
+			if state.Phase == "UnsupportedConfiguration" || (state.Phase != "WaitingForMetadata" && !healthyPhase(state.Phase)) {
+				c.options.Logger.Warn("workload requires attention", append(attrs, "reason", state.Phase, "detail", state.Message)...)
+			} else if existed && prior.Phase != "WaitingForMetadata" && !healthyPhase(prior.Phase) && healthyPhase(state.Phase) {
+				c.options.Logger.Info("workload recovered", append(attrs, "previous_reason", prior.Phase, "phase", state.Phase)...)
+			} else {
+				c.options.Logger.Debug("workload state changed", append(attrs, "phase", state.Phase)...)
+			}
+		}
+		if existed && prior.Config != "" && prior.Config == state.Config {
+			for pathID, current := range state.Versions {
+				if previous, ok := prior.Versions[pathID]; ok && previous != current {
+					c.options.Logger.Info("Vault secret version changed", append(attrs, "path_id", pathID, "previous_version", previous.Version, "version", current.Version)...)
+				}
+			}
+		}
+	}
+	for _, state := range status.Targets {
 		if parent.Err() != nil {
 			return parent.Err()
 		}
@@ -397,6 +437,15 @@ func (r *namespaceRuntime) reconcile(parent context.Context, list []cache.Shared
 		}
 	}
 	return nil
+}
+
+func healthyPhase(phase string) bool {
+	switch phase {
+	case "", "BaselineRecorded", "Pending", "Requested", "RolledOut", "RollingOut":
+		return true
+	default:
+		return false
+	}
 }
 func (r *namespaceRuntime) problem(ctx context.Context, cr *api.VaultReloader, reason string) error {
 	status := copyStatus(cr.Status)

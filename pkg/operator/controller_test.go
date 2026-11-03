@@ -3,6 +3,7 @@
 package operator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -129,6 +130,53 @@ func TestPersistentIntentRetryAndDedup(t *testing.T) {
 	dep, _ := k.AppsV1().Deployments("a").Get(ctx, "app", meta.GetOptions{})
 	if dep.Spec.Template.Annotations[RevisionAnnotation] == "" {
 		t.Fatal("no revision marker")
+	}
+}
+
+func TestLogVersionChangesAndVaultFailuresWithoutRepeating(t *testing.T) {
+	c, _, _, r, list := testController(t, "team-a")
+	var logs bytes.Buffer
+	c.options.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	ctx := context.Background()
+	if err := r.reconcile(ctx, list); err != nil {
+		t.Fatal(err)
+	}
+	seed(t, c, testDeployment("team-a", "app"), 1)
+	if err := r.reconcile(ctx, list); err != nil {
+		t.Fatal(err)
+	}
+	seed(t, c, testDeployment("team-a", "app"), 2)
+	if err := r.reconcile(ctx, list); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "Vault secret version changed") || !strings.Contains(logs.String(), "workload rollout requested") {
+		t.Fatalf("missing event logs: %s", logs.String())
+	}
+	if err := r.reconcile(ctx, list); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(logs.String(), "Vault secret version changed") != 1 {
+		t.Fatalf("version log repeated: %s", logs.String())
+	}
+	c.poller.mu.Lock()
+	for _, entry := range c.poller.entries {
+		entry.observation.Err = "VaultAccessDenied"
+		entry.observation.Stage = "login"
+		entry.observation.HTTPStatus = 403
+	}
+	c.poller.mu.Unlock()
+	if err := r.reconcile(ctx, list); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.reconcile(ctx, list); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(logs.String(), "reason=VaultAccessDenied") != 1 || !strings.Contains(logs.String(), "stage=login http_status=403") {
+		t.Fatalf("missing or repeated error: %s", logs.String())
+	}
+	cr, err := c.getCR(ctx, "team-a")
+	if err != nil || cr.Status.Targets[0].Message != "stage=login http_status=403" {
+		t.Fatalf("missing status details: %+v %v", cr, err)
 	}
 }
 func TestStatusFailurePreventsWorkloadPatch(t *testing.T) {

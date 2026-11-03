@@ -3,9 +3,12 @@
 package operator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -356,26 +359,97 @@ func TestReferenceCompatibilityWithoutReadingValues(t *testing.T) {
 	}
 }
 
-func TestWorkloadLabelOptIn(t *testing.T) {
+func TestWorkloadAnnotationOptIn(t *testing.T) {
 	cases := []struct {
-		name, annotation, resourceLabel, templateLabel string
-		want                                           bool
+		name, workloadAnnotation, templateAnnotation, workloadLabel, templateLabel string
+		want                                                                       bool
 	}{
-		{"annotation", "true", "", "", true},
-		{"resource label", "", "true", "", true},
-		{"pod template label", "", "", "true", true},
-		{"disabled", "false", "false", "false", false},
-		{"either opt in enables", "false", "true", "", true},
+		{"workload annotation", "true", "", "", "", true},
+		{"template annotation", "", "true", "", "", true},
+		{"labels alone ignored", "", "", "true", "true", false},
+		{"disabled annotations", "false", "false", "true", "true", false},
+		{"either annotation enables", "true", "false", "", "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dep := testDeployment("team-a", "app")
-			dep.Spec.Template.Annotations[OptIn] = tc.annotation
-			dep.Labels = map[string]string{OptIn: tc.resourceLabel}
+			dep.Annotations = map[string]string{OptIn: tc.workloadAnnotation}
+			dep.Spec.Template.Annotations[OptIn] = tc.templateAnnotation
+			dep.Labels = map[string]string{OptIn: tc.workloadLabel}
 			dep.Spec.Template.Labels = map[string]string{OptIn: tc.templateLabel}
 			w, err := workloadOf(dep)
 			if err != nil || w.Enabled() != tc.want {
 				t.Fatalf("enabled=%v want=%v err=%v", w.Enabled(), tc.want, err)
+			}
+		})
+	}
+}
+
+func TestWebhookTLSAnnotation(t *testing.T) {
+	for _, tc := range []struct {
+		name, modern, legacy string
+		want                 bool
+		invalid              bool
+	}{
+		{"default", "", "", false, false},
+		{"modern true", "true", "", true, false},
+		{"legacy true", "", "true", true, false},
+		{"modern false overrides legacy", "false", "true", false, false},
+		{"invalid rejected", "invalid", "", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dep := testDeployment("team-a", "app")
+			if tc.modern != "" {
+				dep.Spec.Template.Annotations[prefix+"vault-skip-verify"] = tc.modern
+			}
+			if tc.legacy != "" {
+				dep.Spec.Template.Annotations[deprecatedPrefix+"vault-skip-verify"] = tc.legacy
+			}
+			dep.Spec.Template.Annotations["secrets-reloader.security.bank-vaults.io/reloader-skip-tls-verify"] = "true"
+			dep.Labels = map[string]string{prefix + "vault-skip-verify": "true", "secrets-reloader.security.bank-vaults.io/reloader-skip-tls-verify": "true"}
+			w, _ := workloadOf(dep)
+			s, err := parseSource(w, testOptions())
+			if (err != nil) != tc.invalid || (!tc.invalid && s.SkipTLSVerify != tc.want) {
+				t.Fatalf("skip=%v err=%v", s.SkipTLSVerify, err)
+			}
+		})
+	}
+}
+
+func TestVaultErrorIdentifiesOperationAndHTTPStatus(t *testing.T) {
+	for _, stage := range []string{"login", "metadata"} {
+		t.Run(stage, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/login") && stage == "metadata" {
+					_, _ = fmt.Fprint(w, `{"auth":{"client_token":"token-secret","lease_duration":600}}`)
+					return
+				}
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = fmt.Fprint(w, "private upstream response")
+			}))
+			defer srv.Close()
+			o := testOptions()
+			var logs bytes.Buffer
+			o.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			o.AllowedAddresses = []string{srv.URL}
+			o.JWTFile = filepath.Join(t.TempDir(), "jwt")
+			if err := os.WriteFile(o.JWTFile, []byte("secret-jwt"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			r := NewVaultReader(o, fake.NewClientset())
+			defer r.Close()
+			_, err := r.Read(context.Background(), Source{Address: srv.URL, AuthMount: "kubernetes", Role: "app", Tenant: "team-a"}, "kv/data/demo")
+			var pe *PollError
+			if !errors.As(err, &pe) || pe.Code != "VaultAccessDenied" || pe.Stage != stage || pe.HTTPStatus != 403 {
+				t.Fatalf("unexpected error: %#v", err)
+			}
+			if strings.Contains(err.Error(), "private") || strings.Contains(err.Error(), "secret") {
+				t.Fatal("sensitive content leaked")
+			}
+			for _, sensitive := range []string{"private upstream response", "secret-jwt", "token-secret"} {
+				if strings.Contains(logs.String(), sensitive) {
+					t.Fatalf("debug log leaked %q", sensitive)
+				}
 			}
 		})
 	}
@@ -410,11 +484,15 @@ func TestSkipTLSVerificationIsExplicitAndIsolated(t *testing.T) {
 	if _, err = reader.Read(context.Background(), verified, "kv/data/demo"); err == nil || logins.Load() != 0 {
 		t.Fatalf("untrusted server accepted or received JWT: %v", err)
 	}
-	dep.Labels = map[string]string{SkipTLSVerify: "true"}
+	var tlsErr *PollError
+	if !errors.As(err, &tlsErr) || tlsErr.Code != "VaultTLSUnknownAuthority" || tlsErr.Stage != "login" {
+		t.Fatalf("TLS error missing detail: %v", err)
+	}
+	dep.Spec.Template.Annotations[prefix+"vault-skip-verify"] = "true"
 	w, _ = workloadOf(dep)
 	insecure, err := parseSource(w, o)
 	if err != nil || !insecure.SkipTLSVerify {
-		t.Fatalf("label not recognized: %+v %v", insecure, err)
+		t.Fatalf("webhook annotation not recognized: %+v %v", insecure, err)
 	}
 	if verified.ContextKey() == insecure.ContextKey() {
 		t.Fatal("verified and unverified TLS contexts must not share a client")
@@ -427,19 +505,6 @@ func TestSkipTLSVerificationIsExplicitAndIsolated(t *testing.T) {
 	if _, err = reader.Read(context.Background(), verified, "kv/data/demo"); err == nil || logins.Load() != 1 {
 		t.Fatalf("secure client reused insecure connection: %v", err)
 	}
-	dep.Labels[SkipTLSVerify] = "false"
-	dep.Spec.Template.Labels = map[string]string{SkipTLSVerify: "true"}
-	dep.Spec.Template.Annotations[prefix+"vault-skip-verify"] = "true"
-	w, _ = workloadOf(dep)
-	if source, err := parseSource(w, o); err != nil || !source.SkipTLSVerify {
-		t.Fatalf("pod-template TLS label not recognized: %+v %v", source, err)
-	}
-	dep.Spec.Template.Labels[SkipTLSVerify] = "false"
-	w, _ = workloadOf(dep)
-	if _, err := parseSource(w, o); err == nil {
-		t.Fatal("webhook annotation must not silently disable operator TLS verification")
-	}
-	dep.Spec.Template.Labels[SkipTLSVerify] = "true"
 	dep.Spec.Template.Annotations[prefix+"vault-addr"] = "https://unapproved.example"
 	w, _ = workloadOf(dep)
 	if _, err := parseSource(w, o); err == nil {

@@ -14,10 +14,12 @@ import (
 )
 
 type Observation struct {
-	Version api.Version
-	Success time.Time
-	Err     string
-	Pending bool
+	Version    api.Version
+	Success    time.Time
+	Err        string
+	Stage      string
+	HTTPStatus int
+	Pending    bool
 }
 type pollEntry struct {
 	key         string
@@ -217,6 +219,18 @@ func (p *Poller) execute(ctx context.Context, e *pollEntry, cancel context.Cance
 	p.metrics.Polls.Add(1)
 	version, err := p.reader.Read(ctx, e.source, e.path)
 	now := time.Now()
+	attrs := []any{"namespace", e.source.Tenant, "source_id", e.source.ContextKey()[:12], "path_id", digest(e.path)[:12]}
+	if err != nil {
+		var pe *PollError
+		if errors.As(err, &pe) {
+			attrs = append(attrs, "reason", pe.Code, "stage", pe.Stage, "http_status", pe.HTTPStatus)
+		} else {
+			attrs = append(attrs, "reason", "VaultPollFailed")
+		}
+		p.options.Logger.Debug("Vault metadata poll failed", attrs...)
+	} else {
+		p.options.Logger.Debug("Vault metadata poll succeeded", append(attrs, "version", version.Version)...)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.active--
@@ -244,9 +258,13 @@ func (p *Poller) execute(ctx context.Context, e *pollEntry, cancel context.Cance
 			delay = p.options.RetryMax
 		}
 		e.observation.Err = "VaultPollFailed"
+		e.observation.Stage = ""
+		e.observation.HTTPStatus = 0
 		var pe *PollError
 		if errors.As(err, &pe) {
 			e.observation.Err = pe.Code
+			e.observation.Stage = pe.Stage
+			e.observation.HTTPStatus = pe.HTTPStatus
 			if pe.RetryAfter > delay {
 				delay = pe.RetryAfter
 			}

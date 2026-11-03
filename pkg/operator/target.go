@@ -11,6 +11,7 @@ import (
 	"time"
 
 	api "github.com/bank-vaults/vault-secrets-reloader/api/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -102,7 +103,9 @@ func (r *namespaceRuntime) reconcileTarget(parent context.Context, persisted api
 		return errors.New("workload configuration changed")
 	}
 	if w.Template.Annotations[RevisionAnnotation] != state.Desired {
+		c.options.Logger.Debug("patching workload revision", "namespace", r.namespace, "kind", state.Kind, "name", state.Name)
 		if err = patchRevision(ctx, c.kube, w, state.Desired); err != nil {
+			c.options.Logger.Warn("workload patch failed", "namespace", r.namespace, "kind", state.Kind, "name", state.Name, "reason", apierrors.ReasonForError(err))
 			c.metrics.PatchErrors.Add(1)
 			failed := copyStatus(cr.Status)
 			failed.Targets[index].Phase = "UpdateFailed"
@@ -110,6 +113,7 @@ func (r *namespaceRuntime) reconcileTarget(parent context.Context, persisted api
 			return errors.New("workload patch failed")
 		}
 		c.metrics.Patches.Add(1)
+		c.options.Logger.Info("workload rollout requested", "namespace", r.namespace, "kind", state.Kind, "name", state.Name)
 		// Status follows the patch. If it fails, the marker allows recovery without a second patch.
 		state.Requested = state.Desired
 		now := meta.Now()
@@ -137,6 +141,9 @@ func (r *namespaceRuntime) reconcileTarget(parent context.Context, persisted api
 	status.Targets[index] = state
 	if err = c.writeStatus(ctx, cr, status); err != nil {
 		return fmt.Errorf("persisting rollout state: %w", err)
+	}
+	if state.Phase == "RolledOut" && persisted.Observed != state.Observed {
+		c.options.Logger.Info("workload rollout completed", "namespace", r.namespace, "kind", state.Kind, "name", state.Name)
 	}
 	return nil
 }

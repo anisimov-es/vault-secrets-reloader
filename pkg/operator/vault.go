@@ -30,9 +30,21 @@ import (
 type PollError struct {
 	Code       string
 	RetryAfter time.Duration
+	Stage      string
+	HTTPStatus int
 }
 
 func (e *PollError) Error() string { return e.Code }
+
+func pollStage(err error, stage string) error {
+	var e *PollError
+	if errors.As(err, &e) {
+		copy := *e
+		copy.Stage = stage
+		return &copy
+	}
+	return &PollError{Code: "VaultPollFailed", Stage: stage}
+}
 
 type MetadataReader interface {
 	Read(context.Context, Source, string) (api.Version, error)
@@ -141,6 +153,10 @@ func (v *VaultReader) Read(parent context.Context, s Source, path string) (api.V
 	client, token, err := v.prepare(ctx, s, session)
 	session.mu.Unlock()
 	if err != nil {
+		var pe *PollError
+		if errors.As(err, &pe) && pe.Stage == "" {
+			return zero, pollStage(err, "prepare")
+		}
 		return zero, err
 	}
 	raw, err := v.request(ctx, client, s, "GET", metadata, nil, token)
@@ -153,7 +169,7 @@ func (v *VaultReader) Read(parent context.Context, s Source, path string) (api.V
 			}
 			session.mu.Unlock()
 		}
-		return zero, err
+		return zero, pollStage(err, "metadata")
 	}
 	var response struct {
 		Data struct {
@@ -270,9 +286,10 @@ func (v *VaultReader) prepare(ctx context.Context, s Source, item *vaultSession)
 	if jwt == "" {
 		return nil, "", &PollError{Code: "JWTUnavailable"}
 	}
+	v.options.Logger.Debug("authenticating to Vault", "namespace", s.Tenant, "source_id", s.ContextKey()[:12])
 	raw, err := v.request(ctx, item.client, s, "POST", "auth/"+escapePath(s.AuthMount)+"/login", map[string]string{"role": s.Role, "jwt": jwt}, "")
 	if err != nil {
-		return nil, "", err
+		return nil, "", pollStage(err, "login")
 	}
 	var login struct {
 		Auth struct {
@@ -289,6 +306,7 @@ func (v *VaultReader) prepare(ctx context.Context, s Source, item *vaultSession)
 		ttl = 5 * time.Minute
 	}
 	item.expires = time.Now().Add(ttl)
+	v.options.Logger.Debug("Vault authentication succeeded", "namespace", s.Tenant, "source_id", s.ContextKey()[:12])
 	return item.client, item.token, nil
 }
 func escapePath(s string) string {
@@ -320,6 +338,19 @@ func vaultRequest(ctx context.Context, client *http.Client, s Source, method, pa
 	request.Header.Set("Content-Type", "application/json")
 	response, e := client.Do(request)
 	if e != nil {
+		var authority x509.UnknownAuthorityError
+		var hostname x509.HostnameError
+		var certificate x509.CertificateInvalidError
+		switch {
+		case errors.As(e, &authority):
+			return nil, &PollError{Code: "VaultTLSUnknownAuthority"}
+		case errors.As(e, &hostname):
+			return nil, &PollError{Code: "VaultTLSHostnameMismatch"}
+		case errors.As(e, &certificate):
+			return nil, &PollError{Code: "VaultTLSCertificateInvalid"}
+		case errors.Is(e, context.DeadlineExceeded):
+			return nil, &PollError{Code: "VaultRequestTimeout"}
+		}
 		return nil, &PollError{Code: "VaultTransportError"}
 	}
 	defer func() { _ = response.Body.Close() }()
@@ -342,7 +373,7 @@ func vaultRequest(ctx context.Context, client *http.Client, s Source, method, pa
 		} else if t, err := http.ParseTime(response.Header.Get("Retry-After")); err == nil {
 			retry = time.Until(t)
 		}
-		return nil, &PollError{Code: code, RetryAfter: retry}
+		return nil, &PollError{Code: code, RetryAfter: retry, HTTPStatus: response.StatusCode}
 	}
 	b, e := io.ReadAll(io.LimitReader(response.Body, 2*1024*1024+1))
 	if e != nil || len(b) > 2*1024*1024 {

@@ -20,7 +20,6 @@ import (
 )
 
 const OptIn = "secrets-reloader.security.bank-vaults.io/reload-on-secret-change"
-const SkipTLSVerify = "secrets-reloader.security.bank-vaults.io/reloader-skip-tls-verify"
 const RevisionAnnotation = "secrets-reloader.security.bank-vaults.io/revision"
 const prefix = "secrets-webhook.security.bank-vaults.io/"
 const deprecatedPrefix = "vault.security.banzaicloud.io/"
@@ -62,10 +61,7 @@ func workloadOf(obj interface{}) (Workload, error) {
 }
 func (w Workload) Key() string { return w.Kind + "/" + w.Name + "/" + string(w.UID) }
 func (w Workload) Enabled() bool {
-	return (w.Template.Annotations[OptIn] == "true" || w.hasLabel(OptIn)) && w.Object.GetDeletionTimestamp() == nil
-}
-func (w Workload) hasLabel(key string) bool {
-	return w.Object.GetLabels()[key] == "true" || w.Template.Labels[key] == "true"
+	return (w.Template.Annotations[OptIn] == "true" || w.Object.GetAnnotations()[OptIn] == "true") && w.Object.GetDeletionTimestamp() == nil
 }
 func annotation(a map[string]string, key, def string) string {
 	if v, ok := a[prefix+key]; ok {
@@ -106,7 +102,11 @@ func parseSource(w Workload, o Options) (Source, error) {
 		Address: annotation(a, "vault-addr", o.DefaultAddress), VaultNamespace: annotation(a, "vault-namespace", o.DefaultNamespace),
 		Method: annotation(a, "vault-auth-method", o.DefaultAuthMethod), AuthMount: annotation(a, "vault-path", o.DefaultAuthMount),
 		Role: annotation(a, "vault-role", o.DefaultRole), CASecret: annotation(a, "vault-tls-secret", "")}
-	s.SkipTLSVerify = w.hasLabel(SkipTLSVerify)
+	skip := annotation(a, "vault-skip-verify", "false")
+	if skip != "true" && skip != "false" {
+		return s, errors.New("vault-skip-verify annotation must be true or false")
+	}
+	s.SkipTLSVerify = skip == "true"
 	if annotation(a, "provider", "vault") != "vault" {
 		return s, errors.New("only the Vault provider is supported")
 	}
@@ -127,9 +127,6 @@ func parseSource(w Workload, o Options) (Source, error) {
 	}
 	if s.Method != "kubernetes" {
 		return s, errors.New("only Kubernetes Vault auth is supported in namespaced mode")
-	}
-	if annotation(a, "vault-skip-verify", "false") != "false" && !s.SkipTLSVerify {
-		return s, errors.New("TLS verification cannot be disabled by workload")
 	}
 	if s.Role == "" {
 		s.Role = w.Template.Spec.ServiceAccountName

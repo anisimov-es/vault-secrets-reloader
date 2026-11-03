@@ -26,23 +26,31 @@ Alternatively set `namespaced.installCRD=true`. The CRD is then a regular Helm t
 
 The reusable namespace ClusterRole has the fixed name `vault-secrets-reloader-operator` independent of the release name. `helm get notes` prints that name and the actual operator ServiceAccount. Teams substitute them in [the opt-in example](../examples/namespaced/team.yaml). The chart installs no workload ClusterRoleBinding. Teams need permission to create their CR and bind the role (existing equivalent rights or a narrowly scoped `bind` grant); the operator does not create team bindings or grant itself access.
 
-## Workload labels
+## Workload annotations
 
-A Deployment, StatefulSet or DaemonSet can opt in using `secrets-reloader.security.bank-vaults.io/reload-on-secret-change: "true"` as a label on its own metadata or its Pod-template metadata. The existing Pod-template annotation continues to work. Any one of the three set to `"true"` enables the workload; `"false"` on one does not override `"true"` on another.
+Enable a Deployment, StatefulSet or DaemonSet with the opt-in annotation on workload metadata or Pod template metadata. Vault connection settings are read from the Pod template, as with the webhook:
 
 ```yaml
-metadata:
-  labels:
-    secrets-reloader.security.bank-vaults.io/reload-on-secret-change: "true"
-    # Optional: disables verification for this workload's operator-to-Vault connection.
-    secrets-reloader.security.bank-vaults.io/reloader-skip-tls-verify: "true"
+spec:
+  template:
+    metadata:
+      annotations:
+        secrets-reloader.security.bank-vaults.io/reload-on-secret-change: "true"
+        # Optional; shared with the Vault Secrets Webhook.
+        secrets-webhook.security.bank-vaults.io/vault-skip-verify: "true"
 ```
 
-The TLS label can also be placed under `spec.template.metadata.labels`. TLS verification mode is part of the Vault authentication/cache context. Toggling it changes the source configuration and applies the existing RecordOnly adoption policy: the first observed version in the new context becomes a baseline without a rollout. In particular, a version change during that transition may not trigger a rollout. The labels apply to namespaced mode; legacy behavior is unchanged.
+The deprecated webhook prefix `vault.security.banzaicloud.io/` is also supported; if both are present, the current prefix takes precedence. TLS defaults to verified and its value must be `"true"` or `"false"`. Labels and the former reloader-specific TLS annotation are not used. When migrating existing workloads, move label-based opt-in to an annotation before upgrading.
+
+TLS verification mode is part of the Vault authentication/cache context. Toggling it establishes a new RecordOnly baseline without a rollout; a version change during the transition may not trigger one.
+
+## Logging
+
+Set chart value `logLevel: info` (default) for namespace lifecycle, secret version changes, requested/completed rollouts and errors. `logLevel: debug` additionally records namespace reconciliation, access checks and individual Vault polling/authentication activity. Error status and logs include the operation (`login` or `metadata`) and HTTP status when available. Secret paths are represented by hashes; credentials, secret values and Vault response bodies are not logged. Debug logging can be verbose.
 
 ## Vault authentication
 
-Vault addresses must match the platform's exact origin allowlist. HTTPS verification is enabled by default. In namespaced mode, a workload can explicitly disable certificate and hostname verification for its operator-to-Vault connection with the `secrets-reloader.security.bank-vaults.io/reloader-skip-tls-verify: "true"` label on either the workload or its Pod template. The label does not bypass the origin allowlist or configure Secrets Webhook / the application. Disabling verification lets a network attacker impersonate an allowed Vault endpoint and receive the operator JWT and Vault token; prefer a trusted CA. If the webhook's `vault-skip-verify` annotation is set, the reloader also requires its own explicit skip label. Redirects are disabled. `namespaced.allowHTTPVault=true` is a deliberate platform exception for local development. A CA file supplied through platform-managed volumes can be selected with `namespaced.vaultCAFile` / `VAULT_CACERT`. Changing a CA file replaces the cached transport on the next request.
+Vault addresses must match the platform's exact origin allowlist. HTTPS verification is enabled by default. The reloader reads the webhook's `vault-skip-verify` Pod-template annotation and uses the same setting for its own Vault connection. Disabling verification lets a network attacker impersonate an allowed Vault endpoint and receive the operator JWT and Vault token; prefer a trusted CA. The setting does not bypass the origin allowlist or install a CA in the application. Redirects are disabled. `namespaced.allowHTTPVault=true` is a deliberate platform exception for local development. A CA file supplied through platform-managed volumes can be selected with `namespaced.vaultCAFile` / `VAULT_CACERT`. Changing a CA file replaces the cached transport on the next request.
 
 Only Vault Kubernetes auth and explicit unversioned KV v2 references are supported in this mode. Workload settings use the current `secrets-webhook.security.bank-vaults.io/` annotations, with corresponding `vault.security.banzaicloud.io/` aliases. Explicit unsupported settings fail; they do not silently fall back. Defaults can come from `VAULT_ADDR`, `VAULT_NAMESPACE` (empty means Vault root), `VAULT_ROLE`, `VAULT_PATH` (auth mount), `VAULT_AUTH_METHOD`; role defaults to the Pod-template ServiceAccount name if otherwise absent. This does not automatically import defaults from a separate webhook deployment. Configure consistent values on both components.
 
