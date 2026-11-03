@@ -24,7 +24,7 @@ helm upgrade --install reloader deploy/charts/vault-secrets-reloader \
 
 Alternatively set `namespaced.installCRD=true`. The CRD is then a regular Helm template, with `helm.sh/resource-policy: keep`. Helm's `crds/` mechanism is deliberately not used for conditional installation. Review CRD changes separately; it remains after uninstall or switching back to legacy. Reinstallation/adoption and schema upgrades must be planned by the platform, not assumed automatic.
 
-`helm get notes` prints the actual namespace ClusterRole and operator ServiceAccount names. Teams substitute them in [the opt-in example](../examples/namespaced/team.yaml). The chart installs no workload ClusterRoleBinding. Teams need permission to create their CR and bind the role (existing equivalent rights or a narrowly scoped `bind` grant); the operator does not create team bindings or grant itself access.
+The reusable namespace ClusterRole has the fixed name `vault-secrets-reloader-operator` independent of the release name. `helm get notes` prints that name and the actual operator ServiceAccount. Teams substitute them in [the opt-in example](../examples/namespaced/team.yaml). The chart installs no workload ClusterRoleBinding. Teams need permission to create their CR and bind the role (existing equivalent rights or a narrowly scoped `bind` grant); the operator does not create team bindings or grant itself access.
 
 ## Workload labels
 

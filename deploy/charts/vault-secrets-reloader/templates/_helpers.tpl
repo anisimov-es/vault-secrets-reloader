@@ -65,5 +65,5 @@ Create the name of the service account to use
 {{- printf "%s-discovery" (include "vault-secrets-reloader.fullname" . | trunc 53 | trimSuffix "-") -}}
 {{- end -}}
 {{- define "vault-secrets-reloader.namespaceRole" -}}
-{{- printf "%s-namespace" (include "vault-secrets-reloader.fullname" . | trunc 53 | trimSuffix "-") -}}
+{{- "vault-secrets-reloader-operator" -}}
 {{- end -}}

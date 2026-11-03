@@ -1,7 +1,7 @@
 apiVersion: v2
 type: application
 name: vault-secrets-reloader
-version: 0.5.0-operator-test.1
+version: 0.5.0-operator-test.2
 appVersion: preview-tls-labels-1
 description: A Kubernetes Controller that reloads workloads on a referenced secret change in HashiCorp Vault.
 keywords:

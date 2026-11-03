@@ -12,11 +12,14 @@ import (
 )
 
 func render(t *testing.T, args ...string) []map[string]interface{} {
+	return renderRelease(t, "test", args...)
+}
+func renderRelease(t *testing.T, release string, args ...string) []map[string]interface{} {
 	t.Helper()
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm is required for offline chart tests")
 	}
-	command := append([]string{"template", "test", "../deploy/charts/vault-secrets-reloader", "--namespace", "infra-ns"}, args...)
+	command := append([]string{"template", release, "../deploy/charts/vault-secrets-reloader", "--namespace", "infra-ns"}, args...)
 	output, err := exec.Command("helm", command...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("helm: %v\n%s", err, output)
@@ -32,6 +35,35 @@ func render(t *testing.T, args ...string) []map[string]interface{} {
 		}
 	}
 	return result
+}
+
+func TestNamespacedWorkloadRoleName(t *testing.T) {
+	for _, tc := range []struct {
+		release string
+		extra   []string
+	}{
+		{release: "alpha-vault-secrets-reloader"},
+		{release: "beta-vault-secrets-reloader"},
+		{release: "another-release", extra: []string{"--set", "fullnameOverride=custom-name"}},
+	} {
+		t.Run(tc.release, func(t *testing.T) {
+			args := []string{"--set", "mode=namespaced", "--set", "namespaced.vaultAddressAllowlist[0]=https://vault.test"}
+			args = append(args, tc.extra...)
+			const expected = "vault-secrets-reloader-operator"
+			var found bool
+			for _, obj := range renderRelease(t, tc.release, args...) {
+				if obj["kind"] == "ClusterRole" && obj["metadata"].(map[string]interface{})["name"] == expected {
+					found = true
+				}
+				if obj["kind"] == "ClusterRoleBinding" && obj["roleRef"].(map[string]interface{})["name"] == expected {
+					t.Fatal("workload role must not be bound cluster-wide")
+				}
+			}
+			if !found {
+				t.Fatalf("workload ClusterRole %q not found", expected)
+			}
+		})
+	}
 }
 func TestLegacyAndNamespacedRBAC(t *testing.T) {
 	legacy := render(t)

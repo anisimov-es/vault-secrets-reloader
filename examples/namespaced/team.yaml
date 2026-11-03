@@ -15,7 +15,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: reloader-vault-secrets-reloader-namespace
+  name: vault-secrets-reloader-operator
 subjects:
   - kind: ServiceAccount
     name: reloader-vault-secrets-reloader
