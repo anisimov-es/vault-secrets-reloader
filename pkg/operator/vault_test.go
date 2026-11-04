@@ -20,12 +20,9 @@ import (
 	"time"
 
 	api "github.com/bank-vaults/vault-secrets-reloader/api/v1alpha1"
-	authentication "k8s.io/api/authentication/v1"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
-	ktesting "k8s.io/client-go/testing"
 )
 
 func testOptions() Options {
@@ -86,7 +83,7 @@ func TestMetadataOnlyAndPermissionRecovery(t *testing.T) {
 	o.AllowedAddresses = []string{server.URL}
 	reader := NewVaultReader(o, fake.NewClientset())
 	defer reader.Close()
-	s := Source{Tenant: "a", Address: server.URL, AuthSource: "controller", AuthMount: "kubernetes", Role: "a"}
+	s := Source{Tenant: "a", Address: server.URL, AuthMount: "kubernetes", Role: "a"}
 	got, err := reader.Read(context.Background(), s, "team/kv/data/payments/db")
 	if err != nil || got.Version != 1 {
 		t.Fatalf("version=%v err=%v", got, err)
@@ -194,7 +191,7 @@ func TestSourceSecurityAndPathParsing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Role != "default" || len(s.Paths) != 1 {
+	if s.Role != "reloader-role" || len(s.Paths) != 1 {
 		t.Fatalf("unexpected source: %+v", s)
 	}
 	s2 := s
@@ -230,7 +227,94 @@ func TestSourceSecurityAndPathParsing(t *testing.T) {
 		}
 	}
 }
-func TestDisabledSecretAndTokenRequestNeverReachAPI(t *testing.T) {
+
+func TestReloaderRoleIsRequiredAndIndependentOfApplicationRole(t *testing.T) {
+	dep := testDeployment("team-a", "app")
+	dep.Spec.Template.Annotations[prefix+"vault-role"] = "application-role"
+	dep.Spec.Template.Spec.ServiceAccountName = "application-sa"
+	for _, role := range []string{"", "   "} {
+		dep.Spec.Template.Annotations[VaultRoleAnnotation] = role
+		w, _ := workloadOf(dep)
+		if _, err := parseSource(w, testOptions()); err == nil || !strings.Contains(err.Error(), VaultRoleAnnotation) {
+			t.Fatalf("missing role accepted or unclear error: %v", err)
+		}
+	}
+	dep.Spec.Template.Annotations[VaultRoleAnnotation] = "metadata-role"
+	w, _ := workloadOf(dep)
+	first, err := parseSource(w, testOptions())
+	if err != nil || first.Role != "metadata-role" {
+		t.Fatalf("operator role: %q, error: %v", first.Role, err)
+	}
+	dep.Spec.Template.Annotations[VaultRoleAnnotation] = "other-role"
+	w, _ = workloadOf(dep)
+	second, err := parseSource(w, testOptions())
+	if err != nil || second.Role != "other-role" || first.ContextKey() == second.ContextKey() {
+		t.Fatalf("role change did not change Vault context: %q, %v", second.Role, err)
+	}
+}
+
+func TestVaultLoginUsesOperatorJWTAndReloaderRole(t *testing.T) {
+	var login struct{ Role, JWT string }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/login") {
+			if err := json.NewDecoder(r.Body).Decode(&login); err != nil {
+				t.Error(err)
+			}
+			_, _ = fmt.Fprint(w, `{"auth":{"client_token":"token","lease_duration":600}}`)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"data":{"current_version":1,"created_time":"k","versions":{"1":{"created_time":"v"}}}}`)
+	}))
+	defer srv.Close()
+	o := testOptions()
+	o.JWTFile = filepath.Join(t.TempDir(), "jwt")
+	if err := os.WriteFile(o.JWTFile, []byte("operator-jwt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	o.AllowedAddresses = []string{srv.URL}
+	dep := testDeployment("team-a", "app")
+	dep.Spec.Template.Annotations[prefix+"vault-addr"] = srv.URL
+	dep.Spec.Template.Annotations[prefix+"vault-role"] = "application-role"
+	dep.Spec.Template.Annotations[VaultRoleAnnotation] = "metadata-role"
+	w, _ := workloadOf(dep)
+	s, err := parseSource(w, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kube := fake.NewClientset()
+	reader := NewVaultReader(o, kube)
+	defer reader.Close()
+	if _, err = reader.Read(context.Background(), s, "kv/data/demo"); err != nil {
+		t.Fatal(err)
+	}
+	if login.JWT != "operator-jwt" || login.Role != "metadata-role" {
+		t.Fatalf("wrong Vault login identity or role: role=%q", login.Role)
+	}
+	if len(kube.Actions()) != 0 {
+		t.Fatalf("unexpected Kubernetes calls during login: %v", kube.Actions())
+	}
+}
+
+func TestEmptyOperatorJWTDoesNotContactVault(t *testing.T) {
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+	}))
+	defer srv.Close()
+	o := testOptions()
+	o.JWTFile = filepath.Join(t.TempDir(), "jwt")
+	if err := os.WriteFile(o.JWTFile, []byte("  \n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	o.AllowedAddresses = []string{srv.URL}
+	reader := NewVaultReader(o, fake.NewClientset())
+	defer reader.Close()
+	_, err := reader.Read(context.Background(), Source{Address: srv.URL, AuthMount: "kubernetes", Role: "metadata-role"}, "kv/data/demo")
+	if err == nil || err.Error() != "JWTUnavailable" || requests.Load() != 0 {
+		t.Fatalf("empty JWT handling: err=%v, requests=%d", err, requests.Load())
+	}
+}
+func TestDisabledSecretReadNeverReachesAPI(t *testing.T) {
 	k := fake.NewClientset(&core.Secret{ObjectMeta: meta.ObjectMeta{Name: "ca", Namespace: "a"}})
 	o := testOptions()
 	v := NewVaultReader(o, k)
@@ -243,54 +327,6 @@ func TestDisabledSecretAndTokenRequestNeverReachAPI(t *testing.T) {
 	}
 }
 
-func TestWorkloadTokenRequestChecksApprovedUID(t *testing.T) {
-	k := fake.NewClientset(&core.ServiceAccount{ObjectMeta: meta.ObjectMeta{Name: "payments", Namespace: "a", UID: "approved-uid"}})
-	k.PrependReactor("create", "serviceaccounts", func(action ktesting.Action) (bool, runtime.Object, error) {
-		if action.GetSubresource() != "token" {
-			return false, nil, nil
-		}
-		request := action.(ktesting.CreateAction).GetObject().(*authentication.TokenRequest)
-		if len(request.Spec.Audiences) != 1 || request.Spec.Audiences[0] != "vault" {
-			t.Error("unexpected audience")
-		}
-		return true, &authentication.TokenRequest{Status: authentication.TokenRequestStatus{Token: "workload-jwt"}}, nil
-	})
-	var loginJWT string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/login") {
-			var body map[string]string
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			loginJWT = body["jwt"]
-			_, _ = fmt.Fprint(w, `{"auth":{"client_token":"token","lease_duration":600}}`)
-			return
-		}
-		_, _ = fmt.Fprint(w, `{"data":{"current_version":1,"created_time":"k","versions":{"1":{"created_time":"v"}}}}`)
-	}))
-	defer srv.Close()
-	o := testOptions()
-	o.AuthSource = "workload"
-	o.AllowTokenRequest = true
-	o.AllowedServiceAccounts = []string{"a/payments"}
-	o.AllowedAddresses = []string{srv.URL}
-	v := NewVaultReader(o, k)
-	defer v.Close()
-	s := Source{Tenant: "a", Address: srv.URL, AuthSource: "workload", AuthMount: "kubernetes", Role: "payments", ServiceAccount: "payments", ServiceAccountUID: "approved-uid", Audience: "vault"}
-	if _, err := v.Read(context.Background(), s, "kv/data/x"); err != nil {
-		t.Fatal(err)
-	}
-	if loginJWT != "workload-jwt" {
-		t.Fatal("wrong identity used for Vault login")
-	}
-	s.ServiceAccount = "other"
-	if _, err := v.Read(context.Background(), s, "kv/data/x"); err == nil || err.Error() != "ServiceAccountNotApproved" {
-		t.Fatal("unapproved identity used")
-	}
-	s.ServiceAccount = "payments"
-	s.ServiceAccountUID = "old-uid"
-	if _, err := v.Read(context.Background(), s, "kv/data/x"); err == nil || err.Error() != "ServiceAccountIdentityChanged" {
-		t.Fatal("stale identity used")
-	}
-}
 func TestMetadataRecreateSameVersionChangesIdentity(t *testing.T) {
 	a := api.Version{Version: 1, Created: "old", KeyCreated: "old-key"}
 	b := api.Version{Version: 1, Created: "new", KeyCreated: "new-key"}
@@ -318,7 +354,7 @@ func TestControllerJWTFileRotationInvalidatesLogin(t *testing.T) {
 	}
 	v := NewVaultReader(o, fake.NewClientset())
 	defer v.Close()
-	s := Source{Tenant: "a", Address: srv.URL, AuthMount: "kubernetes", AuthSource: "controller"}
+	s := Source{Tenant: "a", Address: srv.URL, AuthMount: "kubernetes"}
 	if _, err := v.Read(context.Background(), s, "kv/data/x"); err != nil {
 		t.Fatal(err)
 	}
@@ -357,6 +393,50 @@ func TestReferenceCompatibilityWithoutReadingValues(t *testing.T) {
 	w, _ = workloadOf(dep)
 	if _, err = parseSource(w, o); err == nil {
 		t.Fatal("dynamic path accepted")
+	}
+}
+
+func TestReferenceDiscoveryIgnoresIndirectEnvironment(t *testing.T) {
+	dep := testDeployment("a", "app")
+	dep.Spec.Template.Spec.Containers[0].Env = []core.EnvVar{
+		{Name: "DIRECT", Value: "vault:kv/data/direct#password"},
+		{Name: "POD", ValueFrom: &core.EnvVarSource{FieldRef: &core.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+		{Name: "CPU", ValueFrom: &core.EnvVarSource{ResourceFieldRef: &core.ResourceFieldSelector{Resource: "limits.cpu"}}},
+		{Name: "CONFIG", ValueFrom: &core.EnvVarSource{ConfigMapKeyRef: &core.ConfigMapKeySelector{LocalObjectReference: core.LocalObjectReference{Name: "settings"}, Key: "key"}}},
+		{Name: "SECRET", ValueFrom: &core.EnvVarSource{SecretKeyRef: &core.SecretKeySelector{LocalObjectReference: core.LocalObjectReference{Name: "secrets"}, Key: "key"}}},
+	}
+	dep.Spec.Template.Spec.Containers[0].EnvFrom = []core.EnvFromSource{
+		{ConfigMapRef: &core.ConfigMapEnvSource{LocalObjectReference: core.LocalObjectReference{Name: "settings"}}},
+		{SecretRef: &core.SecretEnvSource{LocalObjectReference: core.LocalObjectReference{Name: "secrets"}}},
+	}
+	dep.Spec.Template.Spec.InitContainers = []core.Container{{Name: "init", Env: []core.EnvVar{
+		{Name: "DIRECT", Value: "vault:kv/data/init#key"},
+		{Name: "POD", ValueFrom: &core.EnvVarSource{FieldRef: &core.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
+	}}}
+	dep.Spec.Template.Annotations[prefix+"vault-from-path"] = "kv/data/from-path"
+	w, _ := workloadOf(dep)
+	s, err := parseSource(w, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(s.Paths, ","); got != "kv/data/direct,kv/data/from-path,kv/data/init" {
+		t.Fatalf("unexpected discovered paths: %s", got)
+	}
+}
+
+func TestPlatformCAFileTakesPrecedenceOverWebhookSecret(t *testing.T) {
+	dep := testDeployment("a", "app")
+	dep.Spec.Template.Annotations[prefix+"vault-tls-secret"] = "webhook-ca"
+	w, _ := workloadOf(dep)
+	o := testOptions()
+	o.CAFile = "/platform/ca.crt"
+	s, err := parseSource(w, o)
+	if err != nil || s.CAFile != o.CAFile || s.CASecret != "" {
+		t.Fatalf("platform CA not selected: file=%q secret=%q err=%v", s.CAFile, s.CASecret, err)
+	}
+	o.CAFile = ""
+	if _, err := parseSource(w, o); err == nil {
+		t.Fatal("unapproved CA secret accepted when no platform CA is configured")
 	}
 }
 

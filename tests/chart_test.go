@@ -65,30 +65,7 @@ func TestNamespacedWorkloadRoleName(t *testing.T) {
 		})
 	}
 }
-func TestLegacyAndNamespacedRBAC(t *testing.T) {
-	legacy := render(t)
-	explicit := render(t, "--set", "mode=legacy")
-	if len(legacy) != len(explicit) {
-		t.Fatal("default mode is not legacy")
-	}
-	for _, obj := range legacy {
-		if obj["kind"] == "ClusterRole" {
-			rules := obj["rules"].([]interface{})
-			if len(rules) != 2 {
-				t.Fatal("legacy rules changed")
-			}
-			first := rules[0].(map[string]interface{})
-			if first["verbs"].([]interface{})[2] != "update" {
-				t.Fatal("legacy update permission changed")
-			}
-			if rules[1].(map[string]interface{})["resources"].([]interface{})[0] != "secrets" {
-				t.Fatal("legacy secret permission changed")
-			}
-		}
-		if obj["kind"] == "CustomResourceDefinition" {
-			t.Fatal("legacy unexpectedly installs CRD")
-		}
-	}
+func TestNamespacedRBAC(t *testing.T) {
 	namespaced := render(t, "--set", "mode=namespaced", "--set", "namespaced.vaultAddressAllowlist[0]=https://vault.test", "--set", "namespaced.installCRD=true", "--set", "serviceAccount.create=false", "--set", "serviceAccount.name=existing-sa")
 	roles := map[string][]interface{}{}
 	bindings := []map[string]interface{}{}
@@ -138,22 +115,16 @@ func TestLegacyAndNamespacedRBAC(t *testing.T) {
 		t.Fatal("leader must be allowed to terminate before its replacement becomes Ready")
 	}
 	pod := spec["template"].(map[string]interface{})["spec"].(map[string]interface{})
-	args := pod["containers"].([]interface{})[0].(map[string]interface{})["command"].([]interface{})
-	found := false
-	for _, arg := range args {
-		if arg == "--mode=namespaced" {
-			found = true
-		}
+	if pod["serviceAccountName"] != "existing-sa" {
+		t.Fatal("operator does not use the configured service account")
 	}
-	if !found {
-		t.Fatal("RBAC and process mode disagree")
-	}
+
 }
 func TestChartRejectsInvalidConfiguration(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm unavailable")
 	}
-	for _, args := range [][]string{{"--set", "mode=bogus"}, {"--set", "mode=namespaced"}, {"--set", "mode=namespaced", "--set", "namespaced.vaultAddressAllowlist[0]=https://vault.test", "--set", "namespaced.pollWorkers=0"}} {
+	for _, args := range [][]string{{"--set", "mode=legacy"}, {"--set", "mode=bogus"}, {"--set", "mode=namespaced"}, {"--set", "mode=namespaced", "--set", "namespaced.vaultAddressAllowlist[0]=https://vault.test", "--set", "namespaced.pollWorkers=0"}} {
 		command := append([]string{"template", "test", "../deploy/charts/vault-secrets-reloader"}, args...)
 		if err := exec.Command("helm", command...).Run(); err == nil {
 			t.Fatalf("invalid configuration accepted: %v", args)
@@ -198,6 +169,11 @@ func TestProjectedJWTAndCustomCAVolumesRender(t *testing.T) {
 		pod := obj["spec"].(map[string]interface{})["template"].(map[string]interface{})["spec"].(map[string]interface{})
 		if len(pod["volumes"].([]interface{})) != 2 {
 			t.Fatal("custom volume replaced projected JWT")
+		}
+		projected := pod["volumes"].([]interface{})[0].(map[string]interface{})["projected"].(map[string]interface{})
+		token := projected["sources"].([]interface{})[0].(map[string]interface{})["serviceAccountToken"].(map[string]interface{})
+		if token["audience"] != "vault" {
+			t.Fatalf("unexpected Vault JWT audience: %v", token["audience"])
 		}
 		container := pod["containers"].([]interface{})[0].(map[string]interface{})
 		if len(container["volumeMounts"].([]interface{})) != 2 {

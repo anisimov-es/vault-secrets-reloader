@@ -1,4 +1,4 @@
-{{- if not (has .Values.mode (list "legacy" "namespaced")) }}{{ fail "mode must be legacy or namespaced" }}{{ end -}}
+{{- if ne .Values.mode "namespaced" }}{{ fail "mode must be namespaced" }}{{ end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -45,7 +45,7 @@ spec:
             sources:
               - serviceAccountToken:
                   path: token
-                  audience: {{ .Values.namespaced.vaultAudience | quote }}
+                  audience: "vault"
                   expirationSeconds: 600
 {{- end }}
 {{- with .Values.volumes }}
@@ -65,20 +65,11 @@ spec:
             {{- if .Values.enableJSONLog }}
             - -enable-json-log
             {{- end }}
-            - -collector-sync-period
-            - {{ .Values.collectorSyncPeriod }}
-            - -reloader-run-period
-            - {{ .Values.reloaderRunPeriod }}
             {{- if eq .Values.mode "namespaced" }}
-            - --mode=namespaced
             - {{ printf "--vault-address-allowlist=%s" (join "," .Values.namespaced.vaultAddressAllowlist) | quote }}
             - {{ printf "--allow-http-vault=%v" .Values.namespaced.allowHTTPVault | quote }}
-            - {{ printf "--vault-auth-source=%s" .Values.namespaced.vaultAuthSource | quote }}
-            - {{ printf "--vault-audience=%s" .Values.namespaced.vaultAudience | quote }}
             - {{ printf "--vault-jwt-file=%s" .Values.namespaced.vaultJWTFile | quote }}
             - {{ printf "--vault-ca-file=%s" .Values.namespaced.vaultCAFile | quote }}
-            - {{ printf "--allow-token-request=%v" .Values.namespaced.allowTokenRequest | quote }}
-            - {{ printf "--vault-serviceaccount-allowlist=%s" (join "," .Values.namespaced.serviceAccountAllowlist) | quote }}
             - {{ printf "--allow-ca-secret-reads=%v" .Values.namespaced.allowCASecretReads | quote }}
             - {{ printf "--vault-ca-secret-allowlist=%s" (join "," .Values.namespaced.caSecretAllowlist) | quote }}
             - {{ printf "--leader-elect=%v" .Values.namespaced.leaderElection | quote }}

@@ -13,46 +13,6 @@ metadata:
 
 ---
 
-{{- if eq .Values.mode "legacy" }}
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: {{ template "vault-secrets-reloader.fullname" . }}
-rules:
-  - apiGroups:
-      - "apps"
-    resources:
-      - deployments
-      - statefulsets
-      - daemonsets
-    verbs:
-      - "get"
-      - "list"
-      - "update"
-      - "watch"
-  - apiGroups:
-      - ""
-    resources:
-      - secrets
-    verbs:
-      - "get"
-
----
-
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: {{ template "vault-secrets-reloader.fullname" . }}
-roleRef:
-  kind: ClusterRole
-  apiGroup: rbac.authorization.k8s.io
-  name: {{ template "vault-secrets-reloader.fullname" . }}
-subjects:
-- kind: ServiceAccount
-  namespace: {{ .Release.Namespace }}
-  name: {{ template "vault-secrets-reloader.serviceAccountName" . }}
-
-{{- else }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -112,5 +72,4 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "vault-secrets-reloader.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
-{{- end }}
 {{- end }}

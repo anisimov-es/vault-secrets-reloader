@@ -6,7 +6,6 @@ package operator
 
 import (
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -15,43 +14,38 @@ import (
 )
 
 type Options struct {
-	PollInterval           time.Duration
-	ReconcileInterval      time.Duration
-	AccessInterval         time.Duration
-	SyncTimeout            time.Duration
-	RequestTimeout         time.Duration
-	RetryMin               time.Duration
-	RetryMax               time.Duration
-	RolloutTimeout         time.Duration
-	MaxNamespaces          int
-	MaxTargets             int
-	MaxPaths               int
-	MaxStateBytes          int
-	MaxEntries             int
-	Workers                int
-	PerVaultWorkers        int
-	PerTenantWorkers       int
-	VaultQPS               float64
-	AllowedAddresses       []string
-	AllowHTTP              bool
-	AuthSource             string
-	JWTFile                string
-	Audience               string
-	AllowTokenRequest      bool
-	AllowedServiceAccounts []string // namespace/name, no wildcards
-	AllowCASecrets         bool
-	AllowedCASecrets       []string // namespace/name, no wildcards
-	CAFile                 string
-	DefaultAddress         string
-	DefaultNamespace       string
-	DefaultRole            string
-	DefaultAuthMount       string
-	DefaultAuthMethod      string
-	LeaderElection         bool
-	LeaderNamespace        string
-	LeaderName             string
-	Identity               string
-	Logger                 *slog.Logger
+	PollInterval      time.Duration
+	ReconcileInterval time.Duration
+	AccessInterval    time.Duration
+	SyncTimeout       time.Duration
+	RequestTimeout    time.Duration
+	RetryMin          time.Duration
+	RetryMax          time.Duration
+	RolloutTimeout    time.Duration
+	MaxNamespaces     int
+	MaxTargets        int
+	MaxPaths          int
+	MaxStateBytes     int
+	MaxEntries        int
+	Workers           int
+	PerVaultWorkers   int
+	PerTenantWorkers  int
+	VaultQPS          float64
+	AllowedAddresses  []string
+	AllowHTTP         bool
+	JWTFile           string
+	AllowCASecrets    bool
+	AllowedCASecrets  []string // namespace/name, no wildcards
+	CAFile            string
+	DefaultAddress    string
+	DefaultNamespace  string
+	DefaultAuthMount  string
+	DefaultAuthMethod string
+	LeaderElection    bool
+	LeaderNamespace   string
+	LeaderName        string
+	Identity          string
+	Logger            *slog.Logger
 }
 
 func DefaultOptions() Options {
@@ -60,17 +54,11 @@ func DefaultOptions() Options {
 		RequestTimeout: 10 * time.Second, RetryMin: time.Second, RetryMax: time.Minute,
 		RolloutTimeout: 10 * time.Minute, MaxNamespaces: 128, MaxTargets: 200, MaxPaths: 100,
 		MaxStateBytes: 512 * 1024, MaxEntries: 10000, Workers: 8, PerVaultWorkers: 4,
-		PerTenantWorkers: 2, VaultQPS: 10, AuthSource: "controller",
-		JWTFile: "/var/run/secrets/vault/token", Audience: "vault",
+		PerTenantWorkers: 2, VaultQPS: 10,
+		JWTFile:        "/var/run/secrets/vault/token",
 		DefaultAddress: "https://vault:8200", DefaultAuthMount: "kubernetes", DefaultAuthMethod: "kubernetes",
 		LeaderElection: true, LeaderName: "vault-secrets-reloader", Logger: slog.Default(),
 	}
-}
-func ValidateMode(mode string) error {
-	if mode != "legacy" && mode != "namespaced" {
-		return fmt.Errorf("invalid mode %q: choose legacy or namespaced", mode)
-	}
-	return nil
 }
 func (o Options) Validate() error {
 	if o.PollInterval <= 0 || o.ReconcileInterval <= 0 || o.AccessInterval <= 0 || o.SyncTimeout <= 0 || o.RequestTimeout <= 0 || o.RetryMin <= 0 || o.RetryMax < o.RetryMin || o.RolloutTimeout <= 0 {
@@ -82,17 +70,8 @@ func (o Options) Validate() error {
 	if o.MaxTargets > 1000 || o.MaxPaths > 1000 {
 		return errors.New("target/path limits must not exceed CRD schema limits (1000)")
 	}
-	if o.AuthSource != "controller" && o.AuthSource != "workload" {
-		return errors.New("authSource must be controller or workload")
-	}
-	if o.AuthSource == "workload" && !o.AllowTokenRequest {
-		return errors.New("workload auth requires explicit TokenRequest opt-in")
-	}
-	if o.AuthSource == "controller" && o.JWTFile == "" {
+	if o.JWTFile == "" {
 		return errors.New("controller JWT file is required")
-	}
-	if o.Audience == "" {
-		return errors.New("audience is required")
 	}
 	if o.LeaderElection && (o.LeaderNamespace == "" || o.Identity == "") {
 		return errors.New("leader namespace and unique identity are required")

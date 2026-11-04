@@ -33,7 +33,7 @@ import (
 func testDeployment(ns, name string) *apps.Deployment {
 	return &apps.Deployment{
 		ObjectMeta: meta.ObjectMeta{Namespace: ns, Name: name, UID: types.UID(ns + "-" + name), ResourceVersion: "1", Generation: 1},
-		Spec:       apps.DeploymentSpec{Selector: &meta.LabelSelector{MatchLabels: map[string]string{"app": name}}, Template: core.PodTemplateSpec{ObjectMeta: meta.ObjectMeta{Annotations: map[string]string{OptIn: "true", prefix + "vault-addr": "http://vault.test"}}, Spec: core.PodSpec{Containers: []core.Container{{Name: "app", Image: "test", Env: []core.EnvVar{{Name: "PASSWORD", Value: "vault:kv/data/demo#password"}}}}}}},
+		Spec:       apps.DeploymentSpec{Selector: &meta.LabelSelector{MatchLabels: map[string]string{"app": name}}, Template: core.PodTemplateSpec{ObjectMeta: meta.ObjectMeta{Annotations: map[string]string{OptIn: "true", VaultRoleAnnotation: "reloader-role", prefix + "vault-addr": "http://vault.test"}}, Spec: core.PodSpec{Containers: []core.Container{{Name: "app", Image: "test", Env: []core.EnvVar{{Name: "PASSWORD", Value: "vault:kv/data/demo#password"}}}}}}},
 	}
 }
 
@@ -246,6 +246,38 @@ func TestLogVersionChangesAndVaultFailuresWithoutRepeating(t *testing.T) {
 		t.Fatalf("missing status details: %+v %v", cr, err)
 	}
 }
+func TestMissingReloaderRoleDoesNotBlockOtherWorkloads(t *testing.T) {
+	c, _, _, r, informers := testController(t, "team-a")
+	missing := testDeployment("team-a", "missing-role")
+	delete(missing.Spec.Template.Annotations, VaultRoleAnnotation)
+	missing.Spec.Template.Annotations[prefix+"vault-role"] = "application-role"
+	if err := informers[0].GetStore().Add(missing); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := r.reconcile(ctx, informers); err != nil {
+		t.Fatal(err)
+	}
+	seed(t, c, testDeployment("team-a", "app"), 1)
+	if err := r.reconcile(ctx, informers); err != nil {
+		t.Fatal(err)
+	}
+	cr, err := c.getCR(ctx, "team-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := make(map[string]api.TargetState)
+	for _, state := range cr.Status.Targets {
+		states[state.Name] = state
+	}
+	if state := states["missing-role"]; state.Phase != "UnsupportedConfiguration" || !strings.Contains(state.Message, VaultRoleAnnotation) {
+		t.Fatalf("missing role status: %+v", state)
+	}
+	if state := states["app"]; state.Phase != "BaselineRecorded" {
+		t.Fatalf("valid workload was blocked: %+v", state)
+	}
+}
+
 func TestStatusFailurePreventsWorkloadPatch(t *testing.T) {
 	c, k, d, r, list := testController(t, "a")
 	ctx := context.Background()

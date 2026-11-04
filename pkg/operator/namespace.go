@@ -456,17 +456,6 @@ func (r *namespaceRuntime) problem(ctx context.Context, cr *api.VaultReloader, r
 	return fmt.Errorf("%s", reason)
 }
 
-func (r *namespaceRuntime) sourceFor(ctx context.Context, w Workload) (Source, error) {
-	s, err := parseSource(w, r.controller.options)
-	if err != nil {
-		return s, err
-	}
-	if s.AuthSource == "workload" {
-		sa, err := r.controller.kube.CoreV1().ServiceAccounts(w.Namespace).Get(ctx, s.ServiceAccount, meta.GetOptions{})
-		if err != nil || sa.UID == "" {
-			return s, errors.New("approved ServiceAccount identity unavailable")
-		}
-		s.ServiceAccountUID = string(sa.UID)
-	}
-	return s, nil
+func (r *namespaceRuntime) sourceFor(_ context.Context, w Workload) (Source, error) {
+	return parseSource(w, r.controller.options)
 }

@@ -5,7 +5,6 @@
     "mode": {
       "type": "string",
       "enum": [
-        "legacy",
         "namespaced"
       ]
     },
@@ -15,13 +14,6 @@
         "reconcileInterval": {
           "type": "string",
           "minLength": 1
-        },
-        "vaultAuthSource": {
-          "type": "string",
-          "enum": [
-            "controller",
-            "workload"
-          ]
         },
         "vaultAddressAllowlist": {
           "type": "array",

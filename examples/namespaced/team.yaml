@@ -18,5 +18,5 @@ roleRef:
   name: vault-secrets-reloader-operator
 subjects:
   - kind: ServiceAccount
-    name: reloader-vault-secrets-reloader
-    namespace: infra-ns
+    name: vault-secrets-reloader
+    namespace: vault-infra

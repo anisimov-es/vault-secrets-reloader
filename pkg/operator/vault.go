@@ -22,7 +22,6 @@ import (
 	"time"
 
 	api "github.com/bank-vaults/vault-secrets-reloader/api/v1alpha1"
-	auth "k8s.io/api/authentication/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -248,45 +247,25 @@ func (v *VaultReader) prepare(ctx context.Context, s Source, item *vaultSession)
 		item.credentialID = trust
 		item.token = ""
 	}
-	jwt := ""
-	if s.AuthSource == "workload" {
-		if !v.options.AllowTokenRequest || !contains(v.options.AllowedServiceAccounts, s.Tenant+"/"+s.ServiceAccount) {
-			return nil, "", &PollError{Code: "ServiceAccountNotApproved"}
-		}
-		sa, e := v.kube.CoreV1().ServiceAccounts(s.Tenant).Get(ctx, s.ServiceAccount, meta.GetOptions{})
-		if e != nil || s.ServiceAccountUID == "" || string(sa.UID) != s.ServiceAccountUID {
-			item.token = ""
-			return nil, "", &PollError{Code: "ServiceAccountIdentityChanged"}
-		}
-		if item.token != "" && time.Now().Before(item.expires) {
-			return item.client, item.token, nil
-		}
-		seconds := int64(600)
-		result, e := v.kube.CoreV1().ServiceAccounts(s.Tenant).CreateToken(ctx, s.ServiceAccount, &auth.TokenRequest{Spec: auth.TokenRequestSpec{Audiences: []string{s.Audience}, ExpirationSeconds: &seconds}}, meta.CreateOptions{})
-		if e != nil {
-			return nil, "", &PollError{Code: "TokenRequestDenied"}
-		}
-		jwt = result.Status.Token
-	} else {
-		b, e := os.ReadFile(v.options.JWTFile)
-		if e != nil {
-			item.token = ""
-			return nil, "", &PollError{Code: "JWTUnavailable"}
-		}
-		jwt = strings.TrimSpace(string(b))
-		id := digest(jwt)
-		if item.jwtRevision != id {
-			item.token = ""
-			item.jwtRevision = id
-		}
-		if jwt != "" && item.token != "" && time.Now().Before(item.expires) {
-			return item.client, item.token, nil
-		}
-	}
-	if jwt == "" {
+	b, e := os.ReadFile(v.options.JWTFile)
+	if e != nil {
+		item.token = ""
 		return nil, "", &PollError{Code: "JWTUnavailable"}
 	}
-	v.options.Logger.Debug("authenticating to Vault", "namespace", s.Tenant, "source_id", s.ContextKey()[:12])
+	jwt := strings.TrimSpace(string(b))
+	if jwt == "" {
+		item.token = ""
+		return nil, "", &PollError{Code: "JWTUnavailable"}
+	}
+	id := digest(jwt)
+	if item.jwtRevision != id {
+		item.token = ""
+		item.jwtRevision = id
+	}
+	if item.token != "" && time.Now().Before(item.expires) {
+		return item.client, item.token, nil
+	}
+
 	raw, err := v.request(ctx, item.client, s, "POST", "auth/"+escapePath(s.AuthMount)+"/login", map[string]string{"role": s.Role, "jwt": jwt}, "")
 	if err != nil {
 		return nil, "", pollStage(err, "login")

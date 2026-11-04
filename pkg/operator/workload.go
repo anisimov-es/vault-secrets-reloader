@@ -20,6 +20,7 @@ import (
 )
 
 const OptIn = "secrets-reloader.security.bank-vaults.io/reload-on-secret-change"
+const VaultRoleAnnotation = "secrets-reloader.security.bank-vaults.io/vault-role"
 const RevisionAnnotation = "secrets-reloader.security.bank-vaults.io/revision"
 const prefix = "secrets-webhook.security.bank-vaults.io/"
 const deprecatedPrefix = "vault.security.banzaicloud.io/"
@@ -74,20 +75,16 @@ func annotation(a map[string]string, key, def string) string {
 }
 
 type Source struct {
-	Address           string
-	VaultNamespace    string
-	Method            string
-	AuthMount         string
-	Role              string
-	AuthSource        string
-	Tenant            string
-	ServiceAccount    string
-	Audience          string
-	CASecret          string
-	CAFile            string
-	SkipTLSVerify     bool     `json:"SkipTLSVerify,omitempty"`
-	Paths             []string // data paths; converted to metadata paths without discovery
-	ServiceAccountUID string
+	Address        string
+	VaultNamespace string
+	Method         string
+	AuthMount      string
+	Role           string
+	Tenant         string
+	CASecret       string
+	CAFile         string
+	SkipTLSVerify  bool     `json:"SkipTLSVerify,omitempty"`
+	Paths          []string // data paths; converted to metadata paths without discovery
 }
 
 func digest(v interface{}) string {
@@ -98,10 +95,10 @@ func digest(v interface{}) string {
 func (s Source) ContextKey() string { s.Paths = nil; return digest(s) }
 func parseSource(w Workload, o Options) (Source, error) {
 	a := w.Template.Annotations
-	s := Source{Tenant: w.Namespace, AuthSource: o.AuthSource, Audience: o.Audience, CAFile: o.CAFile,
+	s := Source{Tenant: w.Namespace, CAFile: o.CAFile,
 		Address: annotation(a, "vault-addr", o.DefaultAddress), VaultNamespace: annotation(a, "vault-namespace", o.DefaultNamespace),
 		Method: annotation(a, "vault-auth-method", o.DefaultAuthMethod), AuthMount: annotation(a, "vault-path", o.DefaultAuthMount),
-		Role: annotation(a, "vault-role", o.DefaultRole), CASecret: annotation(a, "vault-tls-secret", "")}
+		Role: strings.TrimSpace(a[VaultRoleAnnotation]), CASecret: annotation(a, "vault-tls-secret", "")}
 	skip := annotation(a, "vault-skip-verify", "false")
 	if skip != "true" && skip != "false" {
 		return s, errors.New("vault-skip-verify annotation must be true or false")
@@ -129,22 +126,14 @@ func parseSource(w Workload, o Options) (Source, error) {
 		return s, errors.New("only Kubernetes Vault auth is supported in namespaced mode")
 	}
 	if s.Role == "" {
-		s.Role = w.Template.Spec.ServiceAccountName
-		if s.Role == "" {
-			s.Role = "default"
-		}
+		return s, errors.New("missing required " + VaultRoleAnnotation + " annotation")
 	}
-	if !validPath(s.AuthMount) || s.Role == "" {
+	if !validPath(s.AuthMount) {
 		return s, errors.New("invalid Vault auth configuration")
 	}
-	if o.AuthSource == "workload" {
-		s.ServiceAccount = w.Template.Spec.ServiceAccountName
-		if s.ServiceAccount == "" {
-			s.ServiceAccount = "default"
-		}
-		if !contains(o.AllowedServiceAccounts, w.Namespace+"/"+s.ServiceAccount) {
-			return s, errors.New("workload ServiceAccount is not approved for TokenRequest")
-		}
+	// A platform-managed CA file takes precedence over the webhook's per-workload Secret.
+	if s.CAFile != "" {
+		s.CASecret = ""
 	}
 	if s.CASecret != "" && (!o.AllowCASecrets || !contains(o.AllowedCASecrets, w.Namespace+"/"+s.CASecret)) {
 		return s, errors.New("CA Secret is not approved for reading")
@@ -178,12 +167,9 @@ func parseSource(w Workload, o Options) (Source, error) {
 	}
 	containers := append(append([]core.Container{}, w.Template.Spec.Containers...), w.Template.Spec.InitContainers...)
 	for _, c := range containers {
-		if len(c.EnvFrom) > 0 {
-			return s, errors.New("envFrom discovery is not supported in namespaced mode")
-		}
 		for _, env := range c.Env {
 			if env.ValueFrom != nil {
-				return s, errors.New("valueFrom discovery is not supported in namespaced mode")
+				continue
 			}
 			if e := add(env.Value); e != nil {
 				return s, e
